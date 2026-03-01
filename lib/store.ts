@@ -86,7 +86,9 @@ export function getShare(key: string): ShareEntry | undefined {
 }
 
 export function getUploadsDir(): string {
-  const dir = path.join(process.cwd(), "uploads");
+  // Serverless environments (Vercel) only allow writes to /tmp
+  const base = process.env.VERCEL ? "/tmp" : process.cwd();
+  const dir = path.join(base, "uploads");
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
