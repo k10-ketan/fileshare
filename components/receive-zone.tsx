@@ -88,6 +88,9 @@ export default function ReceiveZone() {
   const rxChunks = useRef<ArrayBuffer[]>([]);
   const rxBytes = useRef(0);
   const rxMeta = useRef<FileMeta | null>(null);
+  const stateRef = useRef<State>("idle");
+
+  function setStateSync(s: State) { stateRef.current = s; setState(s); }
 
   function cleanup() {
     pcRef.current?.close(); pcRef.current = null;
@@ -96,7 +99,7 @@ export default function ReceiveZone() {
 
   function reset() {
     cleanup();
-    setState("idle"); setDigits(["","","","","",""]); setProgress(0);
+    setStateSync("idle"); setDigits(["","","","","",""]); setProgress(0);
     setError(""); setTotalFiles(0); setCurFileIdx(0);
     setCurFileMeta(null); setReceived([]);
     rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null;
@@ -144,7 +147,7 @@ export default function ReceiveZone() {
         const msg = JSON.parse(data);
         switch (msg.type) {
           case "transfer-start":
-            setTotalFiles(msg.fileCount); setState("receiving"); break;
+            setTotalFiles(msg.fileCount); setStateSync("receiving"); break;
           case "file-start":
             rxChunks.current = []; rxBytes.current = 0;
             rxMeta.current = { name: msg.name, size: msg.size, mimeType: msg.mimeType };
@@ -158,7 +161,7 @@ export default function ReceiveZone() {
             rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null; break;
           }
           case "transfer-end":
-            setState("done"); cleanup(); break;
+            setStateSync("done"); cleanup(); break;
         }
       } else {
         const chunk = data as ArrayBuffer;
@@ -170,28 +173,30 @@ export default function ReceiveZone() {
       }
     };
 
-    ch.onerror = () => { setError("Connection error."); setState("error"); };
+    ch.onerror = () => { setError("Connection error."); setStateSync("error"); };
   }
 
   async function startReceiving() {
     const code = digits.join("");
     if (code.length !== 6) return;
-    setState("connecting"); setError("");
+    setStateSync("connecting"); setError("");
 
     const ws = new WebSocket(SIGNALING_URL); wsRef.current = ws;
     const pc = new RTCPeerConnection(RTC_CONFIG); pcRef.current = pc;
 
-    pc.onicecandidate = e => {
-      if (e.candidate && ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: "ice-candidate", candidate: e.candidate }));
-    };
-    pc.ondatachannel = e => setupChannel(e.channel);
-
     const iceQueue: RTCIceCandidateInit[] = [];
     let isRemoteSet = false;
 
+    // Trickle ICE: send candidates immediately as found
+    pc.onicecandidate = e => {
+      if (e.candidate && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ice-candidate", candidate: e.candidate }));
+      }
+    };
+    pc.ondatachannel = e => setupChannel(e.channel);
+
     ws.onopen = () => ws.send(JSON.stringify({ type: "join", code }));
-    ws.onerror = () => { setError("Cannot reach server."); setState("error"); };
+    ws.onerror = () => { setError("Cannot reach server."); setStateSync("error"); };
 
     ws.onmessage = async ({ data }) => {
       const msg = JSON.parse(data);
@@ -199,19 +204,25 @@ export default function ReceiveZone() {
         case "offer":
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
           isRemoteSet = true;
-          iceQueue.forEach(c => pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
-          iceQueue.length = 0;
+          // Flush queued candidates now that remote desc is set
+          iceQueue.splice(0).forEach(c =>
+            pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+          );
           const ans = await pc.createAnswer();
           await pc.setLocalDescription(ans);
-          ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription })); break;
+          ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription }));
+          break;
         case "ice-candidate":
-          if (isRemoteSet) pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
-          else iceQueue.push(msg.candidate);
+          if (isRemoteSet) {
+            pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+          } else {
+            iceQueue.push(msg.candidate);
+          }
           break;
         case "error":
-          setError(msg.message); setState("error"); break;
+          setError(msg.message); setStateSync("error"); break;
         case "peer-disconnected":
-          if (state !== "done") { setError("Sender disconnected."); setState("error"); }
+          if (stateRef.current !== "done") { setError("Sender disconnected."); setStateSync("error"); }
           break;
       }
     };

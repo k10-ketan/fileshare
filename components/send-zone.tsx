@@ -3,8 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import {
   Upload, Copy, Check, X, ArrowRight,
-  Loader2, CheckCircle2, AlertTriangle, RefreshCcw,
-  FileIcon, Activity
+  Loader2, CheckCircle2, AlertTriangle, RefreshCcw, Activity
 } from "lucide-react";
 import {
   SIGNALING_URL, RTC_CONFIG, CHUNK_SIZE, MAX_BUFFERED,
@@ -52,8 +51,10 @@ export default function SendZone() {
   const channelRef = useRef<RTCDataChannel | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const filesRef = useRef<File[]>([]);
+  const stateRef = useRef<State>("idle");
 
   useEffect(() => { filesRef.current = files; }, [files]);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   function cleanup() {
     channelRef.current?.close(); channelRef.current = null;
@@ -91,6 +92,7 @@ export default function SendZone() {
       const buf = await file.arrayBuffer();
       let offset = 0;
       while (offset < buf.byteLength) {
+        // Backpressure: wait if buffer is full
         if (ch.bufferedAmount > MAX_BUFFERED) {
           await new Promise<void>(res => {
             ch.bufferedAmountLowThreshold = MAX_BUFFERED / 2;
@@ -113,6 +115,7 @@ export default function SendZone() {
     setCode(newCode); setState("waiting"); setError("");
 
     const ws = new WebSocket(SIGNALING_URL); wsRef.current = ws;
+    // Create PC immediately so ICE gathering starts ASAP
     const pc = new RTCPeerConnection(RTC_CONFIG); pcRef.current = pc;
     const ch = pc.createDataChannel("filetransfer", { ordered: true }); channelRef.current = ch;
 
@@ -123,9 +126,11 @@ export default function SendZone() {
     };
     ch.onerror = () => { setError("DataChannel error."); setState("error"); };
 
+    // Trickle ICE: send candidates immediately as they are found
     pc.onicecandidate = e => {
-      if (e.candidate && ws.readyState === WebSocket.OPEN)
+      if (e.candidate && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "ice-candidate", candidate: e.candidate }));
+      }
     };
 
     const iceQueue: RTCIceCandidateInit[] = [];
@@ -149,17 +154,22 @@ export default function SendZone() {
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp))
             .catch(() => { setError("Connection failed."); setState("error"); });
           isRemoteSet = true;
-          iceQueue.forEach(c => pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
-          iceQueue.length = 0;
+          // Flush queued ICE candidates
+          iceQueue.splice(0).forEach(c =>
+            pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+          );
           break;
         case "ice-candidate":
-          if (isRemoteSet) pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
-          else iceQueue.push(msg.candidate);
+          if (isRemoteSet) {
+            pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+          } else {
+            iceQueue.push(msg.candidate);
+          }
           break;
         case "error":
           setError(msg.message); setState("error"); break;
         case "peer-disconnected":
-          if (state !== "done") { setError("Receiver disconnected."); setState("error"); }
+          if (stateRef.current !== "done") { setError("Receiver disconnected."); setState("error"); }
           break;
       }
     };
