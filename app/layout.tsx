@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "FileShare — Temporary File Sharing",
-  description: "Upload any file, share a key, download anywhere. Files expire in 24 hours.",
+  title: "FileShare — P2P File Transfer",
+  description: "Transfer files directly between devices with WebRTC. No server storage, no size limit, completely private.",
 };
 
 export default function RootLayout({
