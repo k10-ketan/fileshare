@@ -187,6 +187,9 @@ export default function ReceiveZone() {
     };
     pc.ondatachannel = e => setupChannel(e.channel);
 
+    const iceQueue: RTCIceCandidateInit[] = [];
+    let isRemoteSet = false;
+
     ws.onopen = () => ws.send(JSON.stringify({ type: "join", code }));
     ws.onerror = () => { setError("Cannot reach server."); setState("error"); };
 
@@ -195,11 +198,16 @@ export default function ReceiveZone() {
       switch (msg.type) {
         case "offer":
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          isRemoteSet = true;
+          iceQueue.forEach(c => pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
+          iceQueue.length = 0;
           const ans = await pc.createAnswer();
           await pc.setLocalDescription(ans);
           ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription })); break;
         case "ice-candidate":
-          pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {}); break;
+          if (isRemoteSet) pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+          else iceQueue.push(msg.candidate);
+          break;
         case "error":
           setError(msg.message); setState("error"); break;
         case "peer-disconnected":

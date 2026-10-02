@@ -128,6 +128,9 @@ export default function SendZone() {
         ws.send(JSON.stringify({ type: "ice-candidate", candidate: e.candidate }));
     };
 
+    const iceQueue: RTCIceCandidateInit[] = [];
+    let isRemoteSet = false;
+
     ws.onopen = () => ws.send(JSON.stringify({ type: "create", code: newCode }));
     ws.onerror = () => { setError("Cannot reach signaling server."); setState("error"); };
 
@@ -143,11 +146,15 @@ export default function SendZone() {
           } catch { setError("Failed to create offer."); setState("error"); }
           break;
         case "answer":
-          pc.setRemoteDescription(new RTCSessionDescription(msg.sdp))
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp))
             .catch(() => { setError("Connection failed."); setState("error"); });
+          isRemoteSet = true;
+          iceQueue.forEach(c => pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
+          iceQueue.length = 0;
           break;
         case "ice-candidate":
-          pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+          if (isRemoteSet) pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+          else iceQueue.push(msg.candidate);
           break;
         case "error":
           setError(msg.message); setState("error"); break;
