@@ -57,7 +57,7 @@ export default function Home() {
 
         {/* Content Container */}
         <div className="bg-black border border-zinc-800 rounded-xl p-1 relative overflow-hidden">
-          <div className="absolute top-0 left-4 w-12 h-[1px] bg-white opacity-20" />
+
           <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-5">
             {tab === "send" ? <SendZone /> : <ReceiveZone />}
           </div>
