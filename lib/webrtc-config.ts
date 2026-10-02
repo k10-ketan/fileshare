@@ -1,5 +1,6 @@
+const defaultHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
 export const SIGNALING_URL =
-  process.env.NEXT_PUBLIC_SIGNALING_URL || "ws://localhost:8080";
+  process.env.NEXT_PUBLIC_SIGNALING_URL || `ws://${defaultHost}:8080`;
 
 export const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
