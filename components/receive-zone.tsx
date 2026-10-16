@@ -164,6 +164,25 @@ export default function ReceiveZone() {
     }
   }
 
+  function downloadAllReceivedFiles() {
+    const failedIndexes: number[] = [];
+    received.forEach((file, index) => {
+      try {
+        triggerDownload(file);
+      } catch {
+        failedIndexes.push(index);
+      }
+    });
+
+    setReceived((current) => current.map((file, index) => ({
+      ...file,
+      downloaded: failedIndexes.includes(index) ? file.downloaded : true,
+      downloadError: failedIndexes.includes(index)
+        ? "Could not start this download. Please try again."
+        : undefined,
+    })));
+  }
+
   function setupChannel(ch: RTCDataChannel) {
     ch.binaryType = "arraybuffer";
     rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null; receivedCount.current = 0; expectedFiles.current = 0;
@@ -405,6 +424,16 @@ export default function ReceiveZone() {
           <div className="w-full text-left mb-6 border-y border-zinc-900 py-2">
              {received.map((f, i) => <ReceivedFileRow key={i} file={f} onDownload={() => downloadReceivedFile(i)} />)}
           </div>
+
+          {received.length > 1 && (
+            <button
+              onClick={downloadAllReceivedFiles}
+              className="mb-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-white px-4 py-2.5 text-sm font-medium text-black transition-colors hover:bg-zinc-200"
+            >
+              <Download className="h-4 w-4" />
+              Download All ({received.length})
+            </button>
+          )}
 
           <button
             onClick={reset}
