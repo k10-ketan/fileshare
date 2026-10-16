@@ -2,7 +2,7 @@
 
 import { useState, useRef } from "react";
 import {
-  ArrowRight, Loader2, CheckCircle2, AlertTriangle, RefreshCcw, Activity
+  ArrowRight, Loader2, CheckCircle2, AlertTriangle, RefreshCcw, Activity, Download
 } from "lucide-react";
 import {
   SIGNALING_URL, RTC_CONFIG, formatBytes
@@ -10,7 +10,7 @@ import {
 
 type State = "idle" | "connecting" | "receiving" | "confirming" | "done" | "error";
 interface FileMeta { name: string; size: number; mimeType: string; }
-interface ReceivedFile { name: string; size: number; }
+interface ReceivedFile { name: string; size: number; blob: Blob; downloaded: boolean; downloadError?: string; }
 
 function DigitBox({
   value, isFocused, inputRef, onChange, onKeyDown, onFocus, onPaste,
@@ -53,7 +53,13 @@ function DigitBox({
   );
 }
 
-function ReceivedFileRow({ file, done = false }: { file: ReceivedFile; done?: boolean }) {
+function ReceivedFileRow({
+  file,
+  onDownload,
+}: {
+  file: ReceivedFile;
+  onDownload: () => void;
+}) {
   const ext = (file.name.split(".").pop() ?? "file").toUpperCase();
   return (
     <div className="flex items-center justify-between py-2 border-b border-zinc-900 last:border-0">
@@ -64,9 +70,16 @@ function ReceivedFileRow({ file, done = false }: { file: ReceivedFile; done?: bo
         <div className="min-w-0">
           <p className="truncate text-sm text-zinc-200 font-medium">{file.name}</p>
           <p className="text-xs text-zinc-500 font-mono mt-0.5">{formatBytes(file.size)}</p>
+          {file.downloadError && <p className="mt-1 text-xs text-red-400">{file.downloadError}</p>}
         </div>
       </div>
-      {done && <CheckCircle2 className="shrink-0 h-4 w-4 text-zinc-600" />}
+      <button
+        onClick={onDownload}
+        className="ml-2 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 transition-colors hover:bg-zinc-800"
+      >
+        {file.downloaded ? <CheckCircle2 className="h-3.5 w-3.5 text-green-500" /> : <Download className="h-3.5 w-3.5" />}
+        {file.downloaded ? "Download again" : "Download"}
+      </button>
     </div>
   );
 }
@@ -79,7 +92,7 @@ export default function ReceiveZone() {
   const [error, setError] = useState("");
   const [totalFiles, setTotalFiles] = useState(0);
   const [curFileIdx, setCurFileIdx] = useState(0);
-  const [curFileMeta, setCurFileMeta] = useState<ReceivedFile | null>(null);
+  const [curFileMeta, setCurFileMeta] = useState<{ name: string; size: number } | null>(null);
   const [received, setReceived] = useState<ReceivedFile[]>([]);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -132,12 +145,23 @@ export default function ReceiveZone() {
     inputRefs.current[Math.min(nums.length, 5)]?.focus();
   }
 
-  function triggerDownload(chunks: ArrayBuffer[], meta: FileMeta) {
-    const blob = new Blob(chunks, { type: meta.mimeType });
+  function triggerDownload(file: ReceivedFile) {
+    const blob = file.blob;
     const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), { href: url, download: meta.name });
+    const a = Object.assign(document.createElement("a"), { href: url, download: file.name });
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 15_000);
+  }
+
+  function downloadReceivedFile(index: number) {
+    const file = received[index];
+    if (!file) return;
+    try {
+      triggerDownload(file);
+      setReceived((current) => current.map((item, i) => i === index ? { ...item, downloaded: true, downloadError: undefined } : item));
+    } catch {
+      setReceived((current) => current.map((item, i) => i === index ? { ...item, downloadError: "Could not start this download. Please try again." } : item));
+    }
   }
 
   function setupChannel(ch: RTCDataChannel) {
@@ -177,10 +201,15 @@ export default function ReceiveZone() {
                 break;
               }
               try {
-                triggerDownload(rxChunks.current, meta);
+                const file: ReceivedFile = {
+                  name: meta.name,
+                  size: meta.size,
+                  blob: new Blob(rxChunks.current, { type: meta.mimeType }),
+                  downloaded: false,
+                };
                 ch.send(JSON.stringify({ type: "file-received", index: msg.index, name: meta.name }));
                 receivedCount.current += 1;
-                setReceived(p => [...p, { name: meta.name, size: meta.size }]);
+                setReceived((current) => [...current, file]);
                 rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null;
               } catch {
                 reportTransferError(`Could not start the download for "${meta.name}".`);
@@ -357,7 +386,7 @@ export default function ReceiveZone() {
           {received.length > 0 && (
             <div className="border-t border-zinc-900 pt-2">
               <p className="text-[10px] text-zinc-600 font-mono uppercase mb-2 tracking-wider">Completed</p>
-              {received.map((f, i) => <ReceivedFileRow key={i} file={f} done />)}
+              {received.map((f, i) => <ReceivedFileRow key={i} file={f} onDownload={() => downloadReceivedFile(i)} />)}
             </div>
           )}
         </div>
@@ -370,11 +399,11 @@ export default function ReceiveZone() {
           </div>
           <p className="text-lg font-medium text-white">All Received</p>
           <p className="text-xs text-zinc-500 font-mono mt-1 mb-6">
-            {received.length} FILE{received.length !== 1 ? "S" : ""} SAVED
+            {received.length} FILE{received.length !== 1 ? "S" : ""} READY TO DOWNLOAD
           </p>
 
           <div className="w-full text-left mb-6 border-y border-zinc-900 py-2">
-             {received.map((f, i) => <ReceivedFileRow key={i} file={f} done />)}
+             {received.map((f, i) => <ReceivedFileRow key={i} file={f} onDownload={() => downloadReceivedFile(i)} />)}
           </div>
 
           <button
