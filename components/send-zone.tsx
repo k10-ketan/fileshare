@@ -10,7 +10,7 @@ import {
   formatBytes, generateCode
 } from "@/lib/webrtc-config";
 
-type State = "idle" | "waiting" | "connecting" | "transferring" | "done" | "error";
+type State = "idle" | "waiting" | "connecting" | "transferring" | "confirming" | "done" | "error";
 
 function FileRow({ file, onRemove }: { file: File; onRemove?: () => void }) {
   const ext = (file.name.split(".").pop() ?? "file").toUpperCase();
@@ -44,6 +44,7 @@ export default function SendZone() {
   const [copied, setCopied] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentFileIdx, setCurrentFileIdx] = useState(0);
+  const [confirmedFiles, setConfirmedFiles] = useState(0);
   const [error, setError] = useState("");
   const [isDragging, setIsDragging] = useState(false);
 
@@ -64,7 +65,7 @@ export default function SendZone() {
 
   function reset() {
     cleanup();
-    setState("idle"); setFiles([]); setCode(""); setProgress(0);
+    setState("idle"); setFiles([]); setCode(""); setProgress(0); setConfirmedFiles(0);
     setCurrentFileIdx(0); setError("");
   }
 
@@ -107,12 +108,14 @@ export default function SendZone() {
       ch.send(JSON.stringify({ type: "file-end", index: i }));
     }
     ch.send(JSON.stringify({ type: "transfer-end" }));
+    // Wait for receiver confirmation before reporting successful delivery.
+    setState("confirming");
   }
 
   async function startSending() {
     if (!filesRef.current.length) return;
     const newCode = generateCode();
-    setCode(newCode); setState("waiting"); setError("");
+    setCode(newCode); setState("waiting"); setError(""); setConfirmedFiles(0);
 
     const ws = new WebSocket(SIGNALING_URL); wsRef.current = ws;
     // Create PC immediately so ICE gathering starts ASAP
@@ -121,10 +124,48 @@ export default function SendZone() {
 
     ch.onopen = async () => {
       setState("transferring");
-      try { await sendAllFiles(ch, filesRef.current); setState("done"); }
+      try { await sendAllFiles(ch, filesRef.current); }
       catch { setError("Transfer failed."); setState("error"); }
     };
-    ch.onerror = () => { setError("DataChannel error."); setState("error"); };
+    ch.onerror = () => {
+      if (stateRef.current === "done" || stateRef.current === "error") return;
+      stateRef.current = "error";
+      setError("DataChannel error before the receiver confirmed the files.");
+      setState("error");
+    };
+    ch.onclose = () => {
+      if (stateRef.current !== "done" && stateRef.current !== "error") {
+        setError("Connection closed before the receiver confirmed the files.");
+        stateRef.current = "error";
+        setState("error");
+      }
+    };
+    ch.onmessage = ({ data }) => {
+      if (typeof data !== "string") return;
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === "file-received") {
+          setConfirmedFiles((count) => Math.max(count, msg.index + 1));
+        } else if (msg.type === "transfer-complete") {
+          // Confirm that the receiver's completion message reached the sender.
+          ch.send(JSON.stringify({ type: "sender-confirmation" }));
+        } else if (msg.type === "receiver-confirmation") {
+          stateRef.current = "done";
+          setState("done");
+          cleanup();
+        } else if (msg.type === "transfer-error") {
+          stateRef.current = "error";
+          setError(msg.message || "The receiver could not complete the download.");
+          setState("error");
+          cleanup();
+        }
+      } catch {
+        stateRef.current = "error";
+        setError("Received an invalid confirmation from the receiver.");
+        setState("error");
+        cleanup();
+      }
+    };
 
     // Trickle ICE: send candidates immediately as they are found
     pc.onicecandidate = e => {
@@ -264,7 +305,7 @@ export default function SendZone() {
         </div>
       )}
 
-      {state === "transferring" && (
+      {(state === "transferring" || state === "confirming") && (
         <div className="py-4 animate-slide-up">
           <div className="flex justify-between items-end mb-2">
             <div>
@@ -285,6 +326,14 @@ export default function SendZone() {
               style={{ width: `${progress}%` }} 
             />
           </div>
+          <p className="mt-2 text-xs text-zinc-500 text-right">
+            Receiver confirmed {confirmedFiles} of {files.length} file{files.length === 1 ? "" : "s"}
+          </p>
+          {state === "confirming" && (
+            <p className="mt-4 text-center text-xs text-zinc-500">
+              Files sent. Waiting for the receiver to confirm the downloads...
+            </p>
+          )}
         </div>
       )}
 

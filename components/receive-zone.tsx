@@ -8,7 +8,7 @@ import {
   SIGNALING_URL, RTC_CONFIG, formatBytes
 } from "@/lib/webrtc-config";
 
-type State = "idle" | "connecting" | "receiving" | "done" | "error";
+type State = "idle" | "connecting" | "receiving" | "confirming" | "done" | "error";
 interface FileMeta { name: string; size: number; mimeType: string; }
 interface ReceivedFile { name: string; size: number; }
 
@@ -88,6 +88,8 @@ export default function ReceiveZone() {
   const rxChunks = useRef<ArrayBuffer[]>([]);
   const rxBytes = useRef(0);
   const rxMeta = useRef<FileMeta | null>(null);
+  const receivedCount = useRef(0);
+  const expectedFiles = useRef(0);
   const stateRef = useRef<State>("idle");
 
   function setStateSync(s: State) { stateRef.current = s; setState(s); }
@@ -102,7 +104,7 @@ export default function ReceiveZone() {
     setStateSync("idle"); setDigits(["","","","","",""]); setProgress(0);
     setError(""); setTotalFiles(0); setCurFileIdx(0);
     setCurFileMeta(null); setReceived([]);
-    rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null;
+    rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null; receivedCount.current = 0; expectedFiles.current = 0;
   }
 
   function onDigitChange(i: number, raw: string) {
@@ -140,28 +142,64 @@ export default function ReceiveZone() {
 
   function setupChannel(ch: RTCDataChannel) {
     ch.binaryType = "arraybuffer";
-    rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null;
+    rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null; receivedCount.current = 0; expectedFiles.current = 0;
+
+    const reportTransferError = (message: string) => {
+      if (ch.readyState === "open") {
+        ch.send(JSON.stringify({ type: "transfer-error", message }));
+      }
+      setError(message);
+      setStateSync("error");
+    };
 
     ch.onmessage = ({ data }) => {
       if (typeof data === "string") {
-        const msg = JSON.parse(data);
-        switch (msg.type) {
-          case "transfer-start":
-            setTotalFiles(msg.fileCount); setStateSync("receiving"); break;
-          case "file-start":
-            rxChunks.current = []; rxBytes.current = 0;
-            rxMeta.current = { name: msg.name, size: msg.size, mimeType: msg.mimeType };
-            setCurFileIdx(msg.index);
-            setCurFileMeta({ name: msg.name, size: msg.size });
-            setProgress(0); break;
-          case "file-end": {
-            const meta = rxMeta.current!;
-            triggerDownload(rxChunks.current, meta);
-            setReceived(p => [...p, { name: meta.name, size: meta.size }]);
-            rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null; break;
+        try {
+          const msg = JSON.parse(data);
+          switch (msg.type) {
+            case "transfer-start":
+              expectedFiles.current = msg.fileCount;
+              setTotalFiles(msg.fileCount); setStateSync("receiving"); break;
+            case "file-start":
+              rxChunks.current = []; rxBytes.current = 0;
+              rxMeta.current = { name: msg.name, size: msg.size, mimeType: msg.mimeType };
+              setCurFileIdx(msg.index);
+              setCurFileMeta({ name: msg.name, size: msg.size });
+              setProgress(0); break;
+            case "file-end": {
+              const meta = rxMeta.current;
+              if (!meta) {
+                reportTransferError("The sender ended a file before its details arrived.");
+                break;
+              }
+              if (rxBytes.current !== meta.size) {
+                reportTransferError(`The received file "${meta.name}" is incomplete (${rxBytes.current} of ${meta.size} bytes).`);
+                break;
+              }
+              try {
+                triggerDownload(rxChunks.current, meta);
+                ch.send(JSON.stringify({ type: "file-received", index: msg.index, name: meta.name }));
+                receivedCount.current += 1;
+                setReceived(p => [...p, { name: meta.name, size: meta.size }]);
+                rxChunks.current = []; rxBytes.current = 0; rxMeta.current = null;
+              } catch {
+                reportTransferError(`Could not start the download for "${meta.name}".`);
+              }
+              break;
+            }
+            case "transfer-end":
+              if (receivedCount.current !== expectedFiles.current) {
+                reportTransferError(`Only ${receivedCount.current} of ${expectedFiles.current} files were received.`);
+                break;
+              }
+              ch.send(JSON.stringify({ type: "transfer-complete", fileCount: receivedCount.current }));
+              setStateSync("confirming"); break;
+            case "sender-confirmation":
+              ch.send(JSON.stringify({ type: "receiver-confirmation" }));
+              setStateSync("done"); cleanup(); break;
           }
-          case "transfer-end":
-            setStateSync("done"); cleanup(); break;
+        } catch {
+          reportTransferError("The transfer data could not be processed.");
         }
       } else {
         const chunk = data as ArrayBuffer;
@@ -173,7 +211,17 @@ export default function ReceiveZone() {
       }
     };
 
-    ch.onerror = () => { setError("Connection error."); setStateSync("error"); };
+    ch.onerror = () => {
+      if (stateRef.current === "done" || stateRef.current === "error") return;
+      setError("Connection error while receiving files.");
+      setStateSync("error");
+    };
+    ch.onclose = () => {
+      if (stateRef.current !== "done" && stateRef.current !== "error") {
+        setError("Connection closed before all files were received.");
+        setStateSync("error");
+      }
+    };
   }
 
   async function startReceiving() {
@@ -336,6 +384,14 @@ export default function ReceiveZone() {
             <RefreshCcw className="w-4 h-4" />
             Receive New
           </button>
+        </div>
+      )}
+
+      {state === "confirming" && (
+        <div className="py-12 text-center animate-slide-up flex flex-col items-center">
+          <Loader2 className="w-8 h-8 text-zinc-400 animate-spin mb-4" />
+          <p className="text-zinc-300 font-medium">Finishing transfer</p>
+          <p className="text-xs text-zinc-500 mt-1">Confirming delivery with the sender</p>
         </div>
       )}
 
